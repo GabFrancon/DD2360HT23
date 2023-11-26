@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <cuda_runtime.h>
 
 #define DataType double
 double start, stop;
@@ -68,21 +69,20 @@ __global__ void vecAdd(const DataType* _vecA, const DataType* _vecB, DataType* _
 /// @brief Entry point of the program. 
 int main(int _argc, char** _argv)
 {
-    int vectorLength;
     if (_argc != 2)
     {
-        fprintf(stderr, "Incorrect input, usage is: %s <vector length>\n", _argv[0]);
+        fprintf(stderr, "Incorrect input, usage is: ./vectorAdd.exe <vector length>\n");
         exit(EXIT_FAILURE);
     }
 
     // Retrieves vector length from the cmd line.
-    vectorLength = atoi(_argv[1]);
-    const int bytesCount = vectorLength * sizeof(DataType);
+    int vectorLength = atoi(_argv[1]);
+    const int sizeofVec = vectorLength * sizeof(DataType);
 
-    DataType* hostInput1 = (DataType*)malloc(bytesCount);
-    DataType* hostInput2 = (DataType*)malloc(bytesCount);
-    DataType* hostOutput = (DataType*)malloc(bytesCount);
-    DataType* resultRef  = (DataType*)malloc(bytesCount);
+    DataType* hostInput1 = (DataType*)malloc(sizeofVec);
+    DataType* hostInput2 = (DataType*)malloc(sizeofVec);
+    DataType* hostOutput = (DataType*)malloc(sizeofVec);
+    DataType* resultRef  = (DataType*)malloc(sizeofVec);
 
     // Fills input vectors with random numbers.
     for (int i = 0; i < vectorLength; ++i)
@@ -97,16 +97,16 @@ int main(int _argc, char** _argv)
     DataType* deviceOutput;
 
     // Allocatse GPU memory.
-    cudaMalloc((void**)&deviceInput1, bytesCount);
-    cudaMalloc((void**)&deviceInput2, bytesCount);
-    cudaMalloc((void**)&deviceOutput, bytesCount);
+    cudaMalloc((void**)&deviceInput1, sizeofVec);
+    cudaMalloc((void**)&deviceInput2, sizeofVec);
+    cudaMalloc((void**)&deviceOutput, sizeofVec);
 
     // Profiling scope: Data copy from host to device
     startTimer();
     {
         // Copies memory to the GPU.
-        cudaMemcpy(deviceInput1, hostInput1, bytesCount, cudaMemcpyHostToDevice);
-        cudaMemcpy(deviceInput2, hostInput2, bytesCount, cudaMemcpyHostToDevice);
+        cudaMemcpy(deviceInput1, hostInput1, sizeofVec, cudaMemcpyHostToDevice);
+        cudaMemcpy(deviceInput2, hostInput2, sizeofVec, cudaMemcpyHostToDevice);
     }
     stopTimer("Data Copy from Host to Device Time");
 
@@ -127,14 +127,16 @@ int main(int _argc, char** _argv)
     startTimer();
     {
         // Copies the GPU memory back to CPU.
-        cudaMemcpy(hostOutput, deviceOutput, bytesCount, cudaMemcpyDeviceToHost);
+        cudaMemcpy(hostOutput, deviceOutput, sizeofVec, cudaMemcpyDeviceToHost);
     }
     stopTimer("Data Copy from Device to Host Time");
 
     // Compares result with the reference.
+    const double epsilon = 1e-5;
+
     for (int i = 0; i < vectorLength; ++i)
     {
-        if (fabs(hostOutput[i] - resultRef[i]) > 1e-5)
+        if (fabs(hostOutput[i] - resultRef[i]) > epsilon)
         {
             fprintf(stderr, "Result mismatch found at element %d: %f != %f\n", i, hostOutput[i], resultRef[i]);
             break;
