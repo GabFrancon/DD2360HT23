@@ -18,3 +18,7 @@
 
 # Executables
 *.exe
+
+# NVIDIA Nsight profiles
+*.nsys-rep
+*.ncu-rep

@@ -10,9 +10,9 @@
  * The program is parameterized by the length of the vectors, specified
  * as a command-line argument.
  *
- * Compilation: $ nvcc -lineinfo vectorAdd.cu -o vectorAdd
+ * Compilation: $ nvcc vectorAdd.cu -o vectorAdd
  *
- * Execution: $ ./vectorAdd <vector_length>
+ * Execution: $ ./vectorAdd.exe <vector_length>
  *
  * Parameters: <vector_length> - Length of the vectors for vector addition.
  *
@@ -21,51 +21,48 @@
  *      $ nvcc -lineinfo vectorAdd.cu -o vectorAdd
  *
  *   2. Run the executable with Nvidia Nsight profiling:
- *      $ nsys profile -o vectorAdd_profile ./vectorAdd <vector_length>
+ *      $ ncu -o vectorAdd_profile -f ./vectorAdd.exe <vector_length>
  *
- *   3. Analyze the profiling results using Nvidia Nsight UI:
- *      $ nsys ui vectorAdd_profile
+ *   3. Analyze the profiling results using Nvidia Nsight Compute:
+ *      $ ncu-ui ./vectorAdd_profile.ncu-rep
  *
  * Note: CUDA toolkit must be installed and configured for compilation.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <cuda_runtime.h>
+#include <time.h>
 
 #define DataType double
-cudaEvent_t start, stop;
+double start, stop;
+
+/// @brief Starts the timer.
+void startTimer()
+{
+    start = (double)clock();
+    start = start / CLOCKS_PER_SEC;
+}
+
+/// @brief Stops the timer and print the elapsed time.
+void stopTimer(const char* message)
+{
+    stop = (double)clock();
+    stop = stop / CLOCKS_PER_SEC;
+
+    double elapsedTime = (stop - start) * 1.0e3;
+    printf("%s: %.6f ms\n", message, elapsedTime);
+}
 
 /// @brief Calculates the global index for the current thread and performs 
 /// element-wise addition of input vectors, storing the result in _out memory.
-__global__ void vecAdd(const DataType* _elementA, const DataType* _elementB, DataType* _out, int _len)
+__global__ void vecAdd(const DataType* _vecA, const DataType* _vecB, DataType* _out, int _len)
 {
     int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (globalIdx < _len)
     {
-        _out[globalIdx] = _elementA[globalIdx] + _elementB[globalIdx];
+        _out[globalIdx] = _vecA[globalIdx] + _vecB[globalIdx];
     }
-}
-
-/// @brief Starts a timer using CUDA events.
-void startTimer()
-{
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start, 0);
-}
-
-/// @brief Stops the timer and prints the time elapsed since startTimer() was last called.
-void stopTimer()
-{
-    cudaEventRecord(stop, 0);
-    cudaEventSynchronize(stop);
-    float elapsedTime;
-    cudaEventElapsedTime(&elapsedTime, start, stop);
-    printf("GPU Vector Addition Time: %.6f ms\n", elapsedTime);
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
 }
 
 /// @brief Entry point of the program. 
@@ -104,22 +101,35 @@ int main(int _argc, char** _argv)
     cudaMalloc((void**)&deviceInput2, bytesCount);
     cudaMalloc((void**)&deviceOutput, bytesCount);
 
-    // Copies memory to the GPU.
-    cudaMemcpy(deviceInput1, hostInput1, bytesCount, cudaMemcpyHostToDevice);
-    cudaMemcpy(deviceInput2, hostInput2, bytesCount, cudaMemcpyHostToDevice);
+    // Profiling scope: Data copy from host to device
+    startTimer();
+    {
+        // Copies memory to the GPU.
+        cudaMemcpy(deviceInput1, hostInput1, bytesCount, cudaMemcpyHostToDevice);
+        cudaMemcpy(deviceInput2, hostInput2, bytesCount, cudaMemcpyHostToDevice);
+    }
+    stopTimer("Data Copy from Host to Device Time");
 
     // Computes the 1D thread grid dimensions.
-    const int blockSize = 256;
+    const int blockSize = 1024;
     const int gridSize = (vectorLength + blockSize - 1) / blockSize;
 
-    // Runs the GPU Kernel.
+    // Profiling Scope: CUDA kernel
     startTimer();
-    vecAdd<<<gridSize, blockSize>>>(deviceInput1, deviceInput2, deviceOutput, vectorLength);
-    cudaDeviceSynchronize();
-    stopTimer();
+    {
+        // Runs the GPU Kernel.
+        vecAdd<<<gridSize, blockSize>>>(deviceInput1, deviceInput2, deviceOutput, vectorLength);
+        cudaDeviceSynchronize();
+    }
+    stopTimer("CUDA Kernel Time");
 
-    // Copies the GPU memory back to CPU.
-    cudaMemcpy(hostOutput, deviceOutput, bytesCount, cudaMemcpyDeviceToHost);
+    // Profiling Scope: Data copy from device to host
+    startTimer();
+    {
+        // Copies the GPU memory back to CPU.
+        cudaMemcpy(hostOutput, deviceOutput, bytesCount, cudaMemcpyDeviceToHost);
+    }
+    stopTimer("Data Copy from Device to Host Time");
 
     // Compares result with the reference.
     for (int i = 0; i < vectorLength; ++i)
