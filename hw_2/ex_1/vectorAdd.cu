@@ -35,6 +35,8 @@
 #include <cuda_runtime.h>
 
 #define DataType double
+#define THREADS_PER_BLOCK 1024
+
 double start, stop;
 
 /// @brief Starts the timer.
@@ -84,7 +86,8 @@ int main(int _argc, char** _argv)
     DataType* hostOutput = (DataType*)malloc(sizeofVec);
     DataType* resultRef  = (DataType*)malloc(sizeofVec);
 
-    // Fills input vectors with random numbers.
+    // Fills input vectors with random numbers, and pre-compute
+    // addition to use as a reference when validating GPU results.
     for (int i = 0; i < vectorLength; ++i)
     {
         hostInput1[i] = rand() / (DataType)RAND_MAX;
@@ -96,7 +99,7 @@ int main(int _argc, char** _argv)
     DataType* deviceInput2;
     DataType* deviceOutput;
 
-    // Allocatse GPU memory.
+    // Allocates GPU memory.
     cudaMalloc((void**)&deviceInput1, sizeofVec);
     cudaMalloc((void**)&deviceInput2, sizeofVec);
     cudaMalloc((void**)&deviceOutput, sizeofVec);
@@ -111,7 +114,7 @@ int main(int _argc, char** _argv)
     stopTimer("Data Copy from Host to Device Time");
 
     // Computes the 1D thread grid dimensions.
-    const int blockSize = 1024;
+    const int blockSize = THREADS_PER_BLOCK;
     const int gridSize = (vectorLength + blockSize - 1) / blockSize;
 
     // Profiling Scope: CUDA kernel

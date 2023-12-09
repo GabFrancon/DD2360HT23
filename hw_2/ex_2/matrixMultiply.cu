@@ -38,6 +38,9 @@
 #include <cuda_runtime.h>
 
 #define DataType double
+#define THREADS_PER_BLOCK_X 8
+#define THREADS_PER_BLOCK_Y 64
+
 double start, stop;
 
 /// @brief Starts the timer.
@@ -162,8 +165,8 @@ int main(int _argc, char** _argv)
     stopTimer("Data Copy from Host to Device Time");
 
     // Computes the grid and block dimensions
-    dim3 blockDim(8, 64);
-    dim3 gridDim((numCColumns + blockDim.x - 1) / blockDim.x, (numCRows + blockDim.y - 1) / blockDim.y);
+    dim3 blockDim(THREADS_PER_BLOCK_X, THREADS_PER_BLOCK_Y, 1);
+    dim3 gridDim((numCColumns + blockDim.x - 1) / blockDim.x, (numCRows + blockDim.y - 1) / blockDim.y, 1);
 
     // Profiling Scope: CUDA kernel
     startTimer();
