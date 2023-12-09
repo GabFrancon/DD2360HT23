@@ -1,3 +1,27 @@
+/*
+ * Histograming using CUDA
+ *
+ * This program demonstrates parallel array histograming on the GPU
+ * using CUDA.
+ *
+ * Compilation: $ nvcc histogram.cu -o histogram
+ *
+ * Execution: $ ./histogram.exe <array_length>
+ *
+ * Parameters: <array_length> - Length of the integer array to be histogramed.
+ *
+ * Profiling with Nvidia Nsight:
+ *   1. Compile the code with profiling information:
+ *      $ nvcc -lineinfo histogram.cu -o histogram
+ *
+ *   2. Run the executable with Nvidia Nsight profiling:
+ *      $ ncu -o histogram_profile -f ./histogram.exe <array_length>
+ *
+ *   3. Analyze the profiling results using Nvidia Nsight Compute:
+ *      $ ncu-ui ./histogram_profile.ncu-rep
+ *
+ * Note: CUDA toolkit must be installed and configured for compilation.
+ */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,77 +30,166 @@
 #include <cuda_runtime.h>
 
 #define NUM_BINS 4096
+#define HISTOGRAM_BLOCK_SIZE 256
+#define SATURATE_BLOCK_SIZE 256
 
-__global__ void histogramKernel(unsigned int* _input, unsigned int* _bins, unsigned int _numElements, unsigned int _numBins)
+double start, stop;
+
+/// @brief Starts the timer.
+void startTimer()
 {
-    //@@ Insert code below to compute histogram of input using shared memory and atomics
-
+    start = (double)clock();
+    start = start / CLOCKS_PER_SEC;
 }
 
-__global__ void convertKernel(unsigned int* _bins, unsigned int _numBins)
+/// @brief Stops the timer and print the elapsed time.
+void stopTimer(const char* message)
 {
-    //@@ Insert code below to clean up bins that saturate at 127
+    stop = (double)clock();
+    stop = stop / CLOCKS_PER_SEC;
 
+    double elapsedTime = (stop - start) * 1.0e3;
+    printf("%s: %.6f ms\n", message, elapsedTime);
 }
 
+/// @brief Naive CUDA kernel to compute array histogram.
+__global__ void naiveHistogramKernel(unsigned int* _input, unsigned int* _bins, unsigned int _numElements, unsigned int _numBins)
+{
+    int globalThreadIdx = blockDim.x * blockIdx.x + threadIdx.x;
+    int globalThreadCount = blockDim.x * gridDim.x;
 
+    // The for loop ensures the array is fully processed, even if 
+    // the number of allocated threads is inferior to _numElements.
+    for (int i = globalThreadIdx; i < _numElements;  i+= globalThreadCount)
+    {
+        unsigned int binValue = _input[i];
+        atomicAdd(&_bins[binValue], 1);
+    }
+}
+
+/// @brief CUDA kernel to saturate the histogram bins.
+__global__ void saturateKernel(unsigned int* _bins, unsigned int _numBins)
+{
+    int globalThreadIdx = blockDim.x * blockIdx.x + threadIdx.x;
+    int globalThreadCount = blockDim.x * gridDim.x;
+
+    // The for loop ensures all histogram bins are saturated, even if 
+    // the number of allocated threads is inferior to _numBins.
+    for (int i = globalThreadIdx; i < _numBins; i += globalThreadCount)
+    {
+        if (_bins[i] > 127)
+        {
+            _bins[i] = 127;
+        }
+    }
+}
+
+/// @brief Entry point of the program.
 int main(int _argc, char** _argv)
 {
+    if (_argc != 2)
+    {
+        fprintf(stderr, "Incorrect input, usage is: ./histogram.exe <array length>\n");
+        exit(EXIT_FAILURE);
+    }
 
-    int inputLength;
-    unsigned int *hostInput;
-    unsigned int *hostBins;
-    unsigned int *resultRef;
-    unsigned int *deviceInput;
-    unsigned int *deviceBins;
+    // Retrieves array length from the cmd line.
+    unsigned int arrayLength = atoi(_argv[1]);
+    const int sizeofInput = arrayLength * sizeof(unsigned int);
+    const int sizeofBins = NUM_BINS * sizeof(unsigned int);
 
-    //@@ Insert code below to read in inputLength from args
+    unsigned int* hostInput = (unsigned int*)malloc(sizeofInput);
+    unsigned int* hostBins  = (unsigned int*)malloc(sizeofBins);
+    unsigned int* resultRef = (unsigned int*)malloc(sizeofBins);
 
-    printf("The input length is %d\n", inputLength);
+    // Init result ref with 0
+    memset(resultRef, 0, sizeofBins);
 
+    // Fills input array with random integers in range [0, NUM_BINS - 1], and
+    // pre-compute histogram to use as a reference when validating GPU result.
+    for (int i = 0; i < arrayLength; ++i)
+    {
+        unsigned int randValue = rand() % NUM_BINS;
+        hostInput[i] = randValue;
 
-    //@@ Insert code below to allocate Host memory for input and output
+        if (resultRef[randValue] < 127)
+        {
+            resultRef[randValue]++;
+        }
+    }
 
+    unsigned int* deviceInput;
+    unsigned int* deviceBins;
 
-    //@@ Insert code below to initialize hostInput to random numbers whose values range from 0 to (NUM_BINS - 1)
+    // Allocates GPU memory.
+    cudaMalloc((void**)&deviceInput, sizeofInput);
+    cudaMalloc((void**)&deviceBins, sizeofBins);
 
+    // Copies array input to the GPU and initializes bins output to 0.
+    cudaMemcpy(deviceInput, hostInput, sizeofInput, cudaMemcpyHostToDevice);
+    cudaMemset(deviceBins, 0, sizeofBins);
 
-    //@@ Insert code below to create reference result in CPU
+    // Computes 1D thread grid dimensions adapted to the size of the input array.
+    const int histBlockSize = HISTOGRAM_BLOCK_SIZE;
+    const int histGridSize = (arrayLength + histBlockSize - 1) / histBlockSize;
 
+    // Profiling scope: histogram kernel
+    startTimer();
+    {
+        // Runs histogram GPU Kernel.
+        naiveHistogramKernel<<<histGridSize, histBlockSize>>>(deviceInput, deviceBins, arrayLength, NUM_BINS);
+        cudaDeviceSynchronize();
 
-    //@@ Insert code below to allocate GPU memory here
+        cudaError_t cudaError = cudaGetLastError();
+        if (cudaError != cudaSuccess)
+        {
+            fprintf(stderr, "CUDA error for histogram kernel: %s\n", cudaGetErrorString(cudaError));
+            exit(EXIT_FAILURE);
+        }
+    }
+    stopTimer("Histogram Kernel Time");
 
+    // Computes 1D thread grid dimensions adapated to the number of bins.
+    const int saturateBlockSize = SATURATE_BLOCK_SIZE;
+    const int saturateGridSize = (NUM_BINS + saturateBlockSize - 1) / saturateBlockSize;
 
-    //@@ Insert code to Copy memory to the GPU here
+    // Profiling scope: saturate kernel
+    startTimer();
+    {
+        // Runs saturate GPU Kernel.
+        saturateKernel<<<saturateGridSize, saturateBlockSize>>>(deviceBins, NUM_BINS);
+        cudaDeviceSynchronize();
 
+        cudaError_t cudaError = cudaGetLastError();
+        if (cudaError != cudaSuccess)
+        {
+            fprintf(stderr, "CUDA error for saturate kernel: %s\n", cudaGetErrorString(cudaError));
+            exit(EXIT_FAILURE);
+        }
+    }
+    stopTimer("Saturate Kernel Time");
 
-    //@@ Insert code to initialize GPU results
+    // Copies the GPU memory back to the CPU.
+    cudaMemcpy(hostBins, deviceBins, sizeofBins, cudaMemcpyDeviceToHost);
 
+    // Compares result with the reference.
+    for (int i = 0; i < NUM_BINS; ++i)
+    {
+        if (hostBins[i] != resultRef[i])
+        {
+            fprintf(stderr, "Result mismatch for integer %d: %u != %u\n", i, hostBins[i], resultRef[i]);
+            break;
+        }
+    }
 
-    //@@ Initialize the grid and block dimensions here
+    // Deallocates GPU memory.
+    cudaFree(deviceInput);
+    cudaFree(deviceBins);
 
-
-    //@@ Launch the GPU Kernel here
-
-
-    //@@ Initialize the second grid and block dimensions here
-
-
-    //@@ Launch the second GPU Kernel here
-
-
-    //@@ Copy the GPU memory back to the CPU here
-
-
-    //@@ Insert code below to compare the output with the reference
-
-
-    //@@ Free the GPU memory here
-
-
-    //@@ Free the CPU memory here
-
+    // Deallocates CPU memory.
+    free(hostInput);
+    free(hostBins);
+    free(resultRef);
 
     return EXIT_SUCCESS;
 }
-
