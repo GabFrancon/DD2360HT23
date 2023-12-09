@@ -30,8 +30,8 @@
 #include <cuda_runtime.h>
 
 #define NUM_BINS 4096
-#define HISTOGRAM_BLOCK_SIZE 256
-#define SATURATE_BLOCK_SIZE 256
+#define THREADS_PER_BLOCK 256
+#define HISTOGRAM_MAX_VALUE 127
 
 double start, stop;
 
@@ -52,8 +52,8 @@ void stopTimer(const char* message)
     printf("%s: %.6f ms\n", message, elapsedTime);
 }
 
-/// @brief Naive CUDA kernel to compute array histogram.
-__global__ void naiveHistogramKernel(unsigned int* _input, unsigned int* _bins, unsigned int _numElements, unsigned int _numBins)
+/// @brief Naive CUDA kernel to compute histogram of given _elements.
+__global__ void naiveHistogramKernel(unsigned int* _elements, unsigned int* _histogram, unsigned int _numElements)
 {
     int globalThreadIdx = blockDim.x * blockIdx.x + threadIdx.x;
     int globalThreadCount = blockDim.x * gridDim.x;
@@ -62,25 +62,22 @@ __global__ void naiveHistogramKernel(unsigned int* _input, unsigned int* _bins, 
     // the number of allocated threads is inferior to _numElements.
     for (int i = globalThreadIdx; i < _numElements;  i+= globalThreadCount)
     {
-        unsigned int binValue = _input[i];
-        atomicAdd(&_bins[binValue], 1);
+        unsigned int binValue = _elements[i];
+        atomicAdd(&_histogram[binValue], 1);
     }
 }
 
-/// @brief CUDA kernel to saturate the histogram bins.
-__global__ void saturateKernel(unsigned int* _bins, unsigned int _numBins)
+/// @brief Naive CUDA kernel to saturate _histogram with HISTOGRAM_MAX_VALUE.
+__global__ void naiveSaturateKernel(unsigned int* _histogram)
 {
     int globalThreadIdx = blockDim.x * blockIdx.x + threadIdx.x;
     int globalThreadCount = blockDim.x * gridDim.x;
 
     // The for loop ensures all histogram bins are saturated, even if 
-    // the number of allocated threads is inferior to _numBins.
-    for (int i = globalThreadIdx; i < _numBins; i += globalThreadCount)
+    // the number of allocated threads is inferior to NUM_BINS.
+    for (int i = globalThreadIdx; i < NUM_BINS; i += globalThreadCount)
     {
-        if (_bins[i] > 127)
-        {
-            _bins[i] = 127;
-        }
+        _histogram[i] = max(_histogram[i], HISTOGRAM_MAX_VALUE);
     }
 }
 
@@ -96,14 +93,14 @@ int main(int _argc, char** _argv)
     // Retrieves array length from the cmd line.
     unsigned int arrayLength = atoi(_argv[1]);
     const int sizeofInput = arrayLength * sizeof(unsigned int);
-    const int sizeofBins = NUM_BINS * sizeof(unsigned int);
+    const int sizeofHistogram = NUM_BINS * sizeof(unsigned int);
 
     unsigned int* hostInput = (unsigned int*)malloc(sizeofInput);
-    unsigned int* hostBins  = (unsigned int*)malloc(sizeofBins);
-    unsigned int* resultRef = (unsigned int*)malloc(sizeofBins);
+    unsigned int* hostHistogram = (unsigned int*)malloc(sizeofHistogram);
+    unsigned int* refHistogram = (unsigned int*)malloc(sizeofHistogram);
 
-    // Init result ref with 0
-    memset(resultRef, 0, sizeofBins);
+    // Initializes reference histogram with 0.
+    memset(refHistogram, 0, sizeofHistogram);
 
     // Fills input array with random integers in range [0, NUM_BINS - 1], and
     // pre-compute histogram to use as a reference when validating GPU result.
@@ -112,32 +109,32 @@ int main(int _argc, char** _argv)
         unsigned int randValue = rand() % NUM_BINS;
         hostInput[i] = randValue;
 
-        if (resultRef[randValue] < 127)
+        if (refHistogram[randValue] < HISTOGRAM_MAX_VALUE)
         {
-            resultRef[randValue]++;
+            refHistogram[randValue]++;
         }
     }
 
     unsigned int* deviceInput;
-    unsigned int* deviceBins;
+    unsigned int* deviceHistogram;
 
     // Allocates GPU memory.
     cudaMalloc((void**)&deviceInput, sizeofInput);
-    cudaMalloc((void**)&deviceBins, sizeofBins);
+    cudaMalloc((void**)&deviceHistogram, sizeofHistogram);
 
     // Copies array input to the GPU and initializes bins output to 0.
     cudaMemcpy(deviceInput, hostInput, sizeofInput, cudaMemcpyHostToDevice);
-    cudaMemset(deviceBins, 0, sizeofBins);
+    cudaMemset(deviceHistogram, 0, sizeofHistogram);
 
-    // Computes 1D thread grid dimensions adapted to the size of the input array.
-    const int histBlockSize = HISTOGRAM_BLOCK_SIZE;
-    const int histGridSize = (arrayLength + histBlockSize - 1) / histBlockSize;
+    // Adapts 1D thread grid dimensions to the size of the input array.
+    const int histogramBlockSize = THREADS_PER_BLOCK;
+    const int histogramGridSize = (arrayLength + histogramBlockSize - 1) / histogramBlockSize;
 
     // Profiling scope: histogram kernel
     startTimer();
     {
         // Runs histogram GPU Kernel.
-        naiveHistogramKernel<<<histGridSize, histBlockSize>>>(deviceInput, deviceBins, arrayLength, NUM_BINS);
+        naiveHistogramKernel<<<histogramGridSize, histogramBlockSize>>>(deviceInput, deviceHistogram, arrayLength);
         cudaDeviceSynchronize();
 
         cudaError_t cudaError = cudaGetLastError();
@@ -149,15 +146,15 @@ int main(int _argc, char** _argv)
     }
     stopTimer("Histogram Kernel Time");
 
-    // Computes 1D thread grid dimensions adapated to the number of bins.
-    const int saturateBlockSize = SATURATE_BLOCK_SIZE;
+    // Adapts 1D thread grid dimensions to the number of bins.
+    const int saturateBlockSize = THREADS_PER_BLOCK;
     const int saturateGridSize = (NUM_BINS + saturateBlockSize - 1) / saturateBlockSize;
 
     // Profiling scope: saturate kernel
     startTimer();
     {
         // Runs saturate GPU Kernel.
-        saturateKernel<<<saturateGridSize, saturateBlockSize>>>(deviceBins, NUM_BINS);
+        naiveSaturateKernel<<<saturateGridSize, saturateBlockSize>>>(deviceHistogram);
         cudaDeviceSynchronize();
 
         cudaError_t cudaError = cudaGetLastError();
@@ -170,26 +167,26 @@ int main(int _argc, char** _argv)
     stopTimer("Saturate Kernel Time");
 
     // Copies the GPU memory back to the CPU.
-    cudaMemcpy(hostBins, deviceBins, sizeofBins, cudaMemcpyDeviceToHost);
+    cudaMemcpy(hostHistogram, deviceHistogram, sizeofHistogram, cudaMemcpyDeviceToHost);
 
     // Compares result with the reference.
     for (int i = 0; i < NUM_BINS; ++i)
     {
-        if (hostBins[i] != resultRef[i])
+        if (hostHistogram[i] != refHistogram[i])
         {
-            fprintf(stderr, "Result mismatch for integer %d: %u != %u\n", i, hostBins[i], resultRef[i]);
+            fprintf(stderr, "Result mismatch for integer %d: %u != %u\n", i, hostHistogram[i], refHistogram[i]);
             break;
         }
     }
 
     // Deallocates GPU memory.
     cudaFree(deviceInput);
-    cudaFree(deviceBins);
+    cudaFree(deviceHistogram);
 
     // Deallocates CPU memory.
     free(hostInput);
-    free(hostBins);
-    free(resultRef);
+    free(hostHistogram);
+    free(refHistogram);
 
     return EXIT_SUCCESS;
 }
