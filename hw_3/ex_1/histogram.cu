@@ -1,21 +1,36 @@
 /*
- * Histograming using CUDA
+ * Histogram Computation using CUDA
  *
- * This program demonstrates parallel array histograming on the GPU
- * using CUDA.
+ * This CUDA program computes a histogram from an array of integers.
+ * It provides two implementations: a naive version and an optimized version.
  *
- * Compilation: $ nvcc histogram.cu -o histogram
+ * Naive Version:
+ *   The naive implementation uses atomic operations to increment histogram bins
+ *   based on the input array elements. Two CUDA kernels are employed: one for
+ *   histogram computation and another for saturating the histogram to a predefined
+ *   maximum value.
  *
- * Execution: $ ./histogram.exe <array_length>
+ * Optimized Version:
+ *   The optimized implementation reduces atomic collisions by having each thread
+ *   block maintain its own local histogram in shared memory. This is achieved
+ *   through two CUDA kernels: one for computing local histograms and another for
+ *   accumulating and saturating them into a global histogram.
  *
- * Parameters: <array_length> - Length of the integer array to be histogramed.
+ * Compilation:
+ * $ nvcc histogram.cu -o histogram
+ *
+ * Execution:
+ * $ ./histogram <input_size>
+ *
+ * Parameters:
+ * <input_size> - Number of elements in the input array.
  *
  * Profiling with Nvidia Nsight:
  *   1. Compile the code with profiling information:
  *      $ nvcc -lineinfo histogram.cu -o histogram
  *
  *   2. Run the executable with Nvidia Nsight profiling:
- *      $ ncu -o histogram_profile -f ./histogram.exe <array_length>
+ *      $ ncu -o histogram_profile -f ./histogram.exe <input_size>
  *
  *   3. Analyze the profiling results using Nvidia Nsight Compute:
  *      $ ncu-ui ./histogram_profile.ncu-rep
@@ -30,63 +45,182 @@
 #include <cuda_runtime.h>
 
 #define NUM_BINS 4096
-#define THREADS_PER_BLOCK 256
+#define THREADS_PER_BLOCK 512
 #define HISTOGRAM_MAX_VALUE 127
+
+// Uncomment the following line to compile and
+// use the optimized version of the program.
+#define OPTIMIZED_VERSION
+
+
+//____________________________________________________________________________________________________________
+// Timer Helpers
 
 double start, stop;
 
-/// @brief Starts the timer.
 void startTimer()
 {
     start = (double)clock();
     start = start / CLOCKS_PER_SEC;
 }
 
-/// @brief Stops the timer and print the elapsed time.
-void stopTimer(const char* message)
+void stopTimer(const char* _message)
 {
     stop = (double)clock();
     stop = stop / CLOCKS_PER_SEC;
 
     double elapsedTime = (stop - start) * 1.0e3;
-    printf("%s: %.6f ms\n", message, elapsedTime);
+    printf("%s: %.6f ms\n", _message, elapsedTime);
 }
 
-/// @brief Naive CUDA kernel to compute histogram of given _elements.
-__global__ void naiveHistogramKernel(unsigned int* _elements, unsigned int* _histogram, unsigned int _numElements)
-{
-    int globalThreadIdx = blockDim.x * blockIdx.x + threadIdx.x;
-    int globalThreadCount = blockDim.x * gridDim.x;
 
-    // The for loop ensures the array is fully processed, even if 
-    // the number of allocated threads is inferior to _numElements.
-    for (int i = globalThreadIdx; i < _numElements;  i+= globalThreadCount)
+//____________________________________________________________________________________________________________
+// CUDA Kernels
+
+#if defined(OPTIMIZED_VERSION)
+    /**
+     * @brief CUDA kernel for an optimized histogram computation using shared memory.
+     *
+     * This kernel employs shared memory to reduce atomic collisions by having each thread block
+     * maintain its own local histogram. Each thread processes a subset of elements from the input
+     * array, incrementing the corresponding local bin in the shared memory using atomicAdd.
+     * The local histograms are then copied to the global memory.
+     *
+     * @param _elements Pointer to the input array of elements.
+     * @param _localBins Pointer to the output array of local histogram bins.
+     * @param _numElements Total number of elements in the input array.
+     */
+    __global__ void optiHistogramKernel(unsigned int* _elements, unsigned int* _localBins, unsigned int _numElements)
     {
-        unsigned int binValue = _elements[i];
-        atomicAdd(&_histogram[binValue], 1);
+        int localThreadIdx = threadIdx.x;
+        int localThreadCount = blockDim.x;
+        int threadBlockIdx = blockIdx.x;
+        int threadBlockCount = gridDim.x;
+
+        int globalThreadIdx = localThreadCount * threadBlockIdx + localThreadIdx;
+        int globalThreadCount = localThreadCount * threadBlockCount;
+
+        // Out-of-bound early discard
+        if (globalThreadIdx >= _numElements)
+        {
+            return;
+        }
+
+        // 1. Init shared local histogram to 0.
+        __shared__ unsigned int sharedLocalBins[NUM_BINS];
+
+        for (int i = localThreadIdx; i < NUM_BINS; i += localThreadCount)
+        {
+            sharedLocalBins[i] = 0;
+        }
+
+        __syncthreads();
+
+        // 2. Compute local histogram for the subset of _elements assigned to current thread block.
+        for (int i = globalThreadIdx; i < _numElements; i += globalThreadCount)
+        {
+            unsigned int binValue = _elements[i];
+            atomicAdd(&sharedLocalBins[binValue], 1);
+        }
+
+        __syncthreads();
+
+        // 3. Copy shared local histogram back to global memory.
+        _localBins += threadBlockIdx * NUM_BINS;
+
+        for (int i = localThreadIdx; i < NUM_BINS; i += localThreadCount)
+        {
+            _localBins[i] = sharedLocalBins[i];
+        }
     }
-}
 
-/// @brief Naive CUDA kernel to saturate _histogram with HISTOGRAM_MAX_VALUE.
-__global__ void naiveSaturateKernel(unsigned int* _histogram)
-{
-    int globalThreadIdx = blockDim.x * blockIdx.x + threadIdx.x;
-    int globalThreadCount = blockDim.x * gridDim.x;
-
-    // The for loop ensures all histogram bins are saturated, even if 
-    // the number of allocated threads is inferior to NUM_BINS.
-    for (int i = globalThreadIdx; i < NUM_BINS; i += globalThreadCount)
+    /**
+     * @brief CUDA kernel to accumulate local histograms into the global one, and saturate the result.
+     *
+     * This kernel processes the local histograms generated by each thread block and accumulates
+     * them into the global histogram. It also saturates the final histogram to a predefined maximum value.
+     *
+     * @param _localBins Pointer to the input array of local histogram bins.
+     * @param _histogram Pointer to the output global histogram array.
+     * @param _numLocalBins Number of local histograms (= grid size of the previous kernel).
+     */
+    __global__ void optiConvertKernel(unsigned int* _localBins, unsigned int* _histogram, unsigned int _numLocalBins)
     {
-        _histogram[i] = min(_histogram[i], HISTOGRAM_MAX_VALUE);
-    }
-}
+        int i = blockDim.x * blockIdx.x + threadIdx.x;
 
-/// @brief Entry point of the program.
+        // Out-of-bound early discard
+        if (i >= NUM_BINS)
+        {
+            return;
+        }
+
+        // 1. Accumulate local histograms for the current bin.
+        unsigned int binSum = 0;
+
+        for (int j = 0; j < _numLocalBins; j++)
+        {
+            binSum += _localBins[i + j * NUM_BINS];
+        }
+
+        // 2. Saturate histogram to the predefined max value.
+        _histogram[i] = min(binSum, HISTOGRAM_MAX_VALUE);
+    }
+#else
+    /**
+     * @brief CUDA kernel for a basic histogram computation.
+     *
+     * This is a naive implementation that assigns each thread to process a subset of elements
+     * from the input array, incrementing the corresponding bin in the histogram using atomicAdd.
+     *
+     * @param _elements Pointer to the input array of elements.
+     * @param _histogram Pointer to the output histogram array.
+     * @param _numElements Total number of elements in the input array.
+     */
+    __global__ void naiveHistogramKernel(unsigned int* _elements, unsigned int* _histogram, unsigned int _numElements)
+    {
+        int globalThreadIdx = blockDim.x * blockIdx.x + threadIdx.x;
+        int globalThreadCount = blockDim.x * gridDim.x;
+
+        // The for loop ensures the array is fully processed, even if 
+        // the number of allocated threads is inferior to _numElements.
+        for (int i = globalThreadIdx; i < _numElements; i += globalThreadCount)
+        {
+            unsigned int binValue = _elements[i];
+            atomicAdd(&_histogram[binValue], 1);
+        }
+    }
+
+    /**
+     * @brief CUDA kernel to saturate the previoulsy produced histogram.
+     *
+     * This is a basic implementation that assigns each thread to process a subset of bins
+     * from the histogram, saturating their values to a predefined maximum.
+     *
+     * @param _histogram Pointer to the histogram array.
+     */
+    __global__ void naiveConvertKernel(unsigned int* _histogram)
+    {
+        int globalThreadIdx = blockDim.x * blockIdx.x + threadIdx.x;
+        int globalThreadCount = blockDim.x * gridDim.x;
+
+        // The for loop ensures all histogram bins are saturated, even if 
+        // the number of allocated threads is inferior to NUM_BINS.
+        for (int i = globalThreadIdx; i < NUM_BINS; i += globalThreadCount)
+        {
+            _histogram[i] = min(_histogram[i], HISTOGRAM_MAX_VALUE);
+        }
+    }
+#endif
+
+
+//____________________________________________________________________________________________________________
+// Entry Point
+
 int main(int _argc, char** _argv)
 {
     if (_argc != 2)
     {
-        fprintf(stderr, "Incorrect input, usage is: ./histogram.exe <array length>\n");
+        fprintf(stderr, "Incorrect input, usage is: ./histogram.exe <input_size>\n");
         exit(EXIT_FAILURE);
     }
 
@@ -130,41 +264,59 @@ int main(int _argc, char** _argv)
     const int histogramBlockSize = THREADS_PER_BLOCK;
     const int histogramGridSize = (arrayLength + histogramBlockSize - 1) / histogramBlockSize;
 
+    #if defined(OPTIMIZED_VERSION)
+        // Allocates local histogram bins and fills them with 0.
+        unsigned int* deviceLocalBins;
+        const unsigned int numLocalBins = histogramGridSize;
+        cudaMalloc((void**)&deviceLocalBins, NUM_BINS * numLocalBins);
+        cudaMemset(deviceLocalBins, 0, NUM_BINS * numLocalBins);
+    #endif
+
     // Profiling scope: histogram kernel
     startTimer();
     {
-        // Runs histogram GPU Kernel.
-        naiveHistogramKernel<<<histogramGridSize, histogramBlockSize>>>(deviceInput, deviceHistogram, arrayLength);
-        cudaDeviceSynchronize();
+        #if defined(OPTIMIZED_VERSION)
+            // Runs optimized version of the GPU kernel.
+            optiHistogramKernel<<<histogramGridSize, histogramBlockSize>>>(deviceInput, deviceLocalBins, arrayLength);
+        #else
+            // Runs naive version of the GPU kernel.
+            naiveHistogramKernel<<<histogramGridSize, histogramBlockSize>>>(deviceInput, deviceHistogram, arrayLength);
+        #endif
 
+        cudaDeviceSynchronize();
         cudaError_t cudaError = cudaGetLastError();
+
         if (cudaError != cudaSuccess)
         {
             fprintf(stderr, "CUDA error for histogram kernel: %s\n", cudaGetErrorString(cudaError));
-            exit(EXIT_FAILURE);
         }
     }
     stopTimer("Histogram Kernel Time");
 
     // Adapts 1D thread grid dimensions to the number of bins.
-    const int saturateBlockSize = THREADS_PER_BLOCK;
-    const int saturateGridSize = (NUM_BINS + saturateBlockSize - 1) / saturateBlockSize;
+    const int convertBlockSize = THREADS_PER_BLOCK;
+    const int convertGridSize = (NUM_BINS + convertBlockSize - 1) / convertBlockSize;
 
-    // Profiling scope: saturate kernel
+    // Profiling scope: convert kernel
     startTimer();
     {
-        // Runs saturate GPU Kernel.
-        naiveSaturateKernel<<<saturateGridSize, saturateBlockSize>>>(deviceHistogram);
-        cudaDeviceSynchronize();
+        #if defined(OPTIMIZED_VERSION)
+            // Runs optimized version of the GPU kernel.
+            optiConvertKernel<<<convertGridSize, convertBlockSize>>>(deviceLocalBins, deviceHistogram, numLocalBins);
+        #else
+            // Runs naive version of the GPU kernel.
+            naiveConvertKernel<<<convertGridSize, convertBlockSize>>>(deviceHistogram);
+        #endif
 
+        cudaDeviceSynchronize();
         cudaError_t cudaError = cudaGetLastError();
+
         if (cudaError != cudaSuccess)
         {
-            fprintf(stderr, "CUDA error for saturate kernel: %s\n", cudaGetErrorString(cudaError));
-            exit(EXIT_FAILURE);
+            fprintf(stderr, "CUDA error for convert kernel: %s\n", cudaGetErrorString(cudaError));
         }
     }
-    stopTimer("Saturate Kernel Time");
+    stopTimer("Convert Kernel Time");
 
     // Copies the GPU memory back to the CPU.
     cudaMemcpy(hostHistogram, deviceHistogram, sizeofHistogram, cudaMemcpyDeviceToHost);
@@ -182,6 +334,10 @@ int main(int _argc, char** _argv)
     // Deallocates GPU memory.
     cudaFree(deviceInput);
     cudaFree(deviceHistogram);
+
+    #if defined(OPTIMIZED_VERSION)
+        cudaFree(deviceLocalBins);
+    #endif
 
     // Deallocates CPU memory.
     free(hostInput);
