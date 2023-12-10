@@ -77,7 +77,7 @@ __global__ void naiveSaturateKernel(unsigned int* _histogram)
     // the number of allocated threads is inferior to NUM_BINS.
     for (int i = globalThreadIdx; i < NUM_BINS; i += globalThreadCount)
     {
-        _histogram[i] = max(_histogram[i], HISTOGRAM_MAX_VALUE);
+        _histogram[i] = min(_histogram[i], HISTOGRAM_MAX_VALUE);
     }
 }
 
