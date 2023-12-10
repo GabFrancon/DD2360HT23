@@ -20,8 +20,11 @@
  * $ nvcc histogram.cu -o histogram
  *
  * Execution:
- * $ ./histogram <input_size>
+ * $ ./histogram.exe <input_size>
  *
+ * Plot results:
+ * $ python ./histogramPlot.py
+ * 
  * Parameters:
  * <input_size> - Number of elements in the input array.
  *
@@ -45,7 +48,7 @@
 #include <cuda_runtime.h>
 
 #define NUM_BINS 4096
-#define THREADS_PER_BLOCK 512
+#define THREADS_PER_BLOCK 256
 #define HISTOGRAM_MAX_VALUE 127
 
 // Uncomment the following line to compile and
@@ -338,6 +341,27 @@ int main(int _argc, char** _argv)
     #if defined(OPTIMIZED_VERSION)
         cudaFree(deviceLocalBins);
     #endif
+
+    // Opens a file for writing histogram result.
+    const char* kHistogramPath = "histogram.txt";
+    FILE* file = fopen(kHistogramPath, "w");
+
+    if (file)
+    {
+        // Writes histogram data to the file.
+        for (int i = 0; i < NUM_BINS; ++i)
+        {
+            fprintf(file, "%u\n", hostHistogram[i]);
+        }
+
+        // Close the file
+        fprintf(stdout, "Result saved at '%s'.\n", kHistogramPath);
+        fclose(file);
+    }
+    else
+    {
+        fprintf(stderr, "Error opening file for writing.\n");
+    }
 
     // Deallocates CPU memory.
     free(hostInput);

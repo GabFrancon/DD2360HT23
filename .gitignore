@@ -1,15 +1,15 @@
-# Compiled Object files
+# Compiled Object Files
 *.slo
 *.lo
 *.o
 *.obj
 
-# Compiled Dynamic libraries
+# Compiled Dynamic Libraries
 *.so
 *.dylib
 *.dll
 
-# Compiled Static libraries
+# Compiled Static Libraries
 *.lai
 *.la
 *.a
@@ -19,6 +19,10 @@
 # Executables
 *.exe
 
-# NVIDIA Nsight profiles
+# NVIDIA Nsight Profiles
 *.nsys-rep
 *.ncu-rep
+
+# Generated Data Files
+*.txt
+*.png
