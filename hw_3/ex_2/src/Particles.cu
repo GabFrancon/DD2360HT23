@@ -642,7 +642,7 @@ int mover_PC_gpu(struct particles* part, struct EMfield* field, struct grid* grd
     allocateParticleGPU(part, &partGPU);
 
     // Choose blockDim and gridDim based on the number of particles to process
-    int blockSize = 512;
+    int blockSize = 1024;
     int gridSize = (part->nop + blockSize - 1) / blockSize;
 
     // Start subcycling
